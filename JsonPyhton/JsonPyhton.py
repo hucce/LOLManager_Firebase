@@ -43,9 +43,81 @@ def FirebaseSeason(currentSeason):
             rankDic[ranker] = 0
 
         # 업데이트
-        #dir.child('MatchDatas').update(matchDic)
+        dir.child('MatchDatas').update(matchDic)
         dir.child('SeasonDatas').update(seasondata)
-        #dir.child('Ranking').update(rankDic)
+        dir.child('Ranking').update(rankDic)
+
+        WriteTop10MatchTeams(json_ranker, userdata, teamName)
+    else:
+        rank = 1
+        for ranker in json_ranker:
+            if 'matchData' in userdata[ranker]:
+                if 'Season' in userdata[ranker]:
+                    if currentSeason == 2020:
+                        row = userdata[ranker]['matchData'].split(',')
+                        json_ranker[ranker] = str(json_ranker[ranker]) + ',' + row[0] + ',' + row[1] + ',' + str(rank) + ',' + str(False)
+                        rank +=1
+                else:
+                    if currentSeason == userdata[ranker]['Season']:
+                        row = userdata[ranker]['matchData'].split(',')
+                        json_ranker[ranker] = str(json_ranker[ranker]) + ',' + row[0] + ',' + row[1] + ',' + str(rank) + ',' + str(False)
+                        rank +=1
+
+def Export(currentSeason):
+    with open('./lol-esports-3080c_data.json', 'r', encoding='UTF8') as file:
+        json_data = json.load(file)
+    
+    rankdata = json_data['Ranking']
+    matchdata = json_data['MatchDatas']
+    userdata = json_data['users']
+    seasondata = json_data['SeasonDatas']
+    teamName = json_data['TeamName']
+
+    # 정렬
+    res = sorted(rankdata.items(), reverse=True, key=lambda item: int(item[1]))
+    json_ranker = dict(res)
+    
+    # 정렬한 것을 토대로 값을 변경한다
+    if currentSeason == 202000:
+        rank = 1
+        # 시즌데이터
+        for ranker in json_ranker:
+            if 'matchData' in userdata[ranker]:
+                row = userdata[ranker]['matchData'].split(',')
+                # 기존 시즌데이터가 있는지 확인한다.
+                writeDic = {}
+                if ranker in seasondata:
+                    writeDic = seasondata[ranker]
+                
+                writeDic[currentSeason] = str(json_ranker[ranker]) + ',' + row[0] + ',' + row[1] + ',' + str(rank)
+                seasondata[ranker] = writeDic
+                rank +=1
+            else:
+                row = matchdata[ranker].split(',')
+                # 기존 시즌데이터가 있는지 확인한다.
+                writeDic = {}
+                if ranker in seasondata:
+                    writeDic = seasondata[ranker]
+
+                writeDic[currentSeason] = str(json_ranker[ranker]) + ',' + row[0] + ',' + row[1] + ',' + str(rank)
+                seasondata[ranker] = writeDic
+                rank +=1
+
+        # 매치데이터
+        matchDic = {}
+        for ranker in json_ranker:
+            matchDic[ranker] = "0,0,0,0"
+        # 랭크
+        rankDic = {}
+        for ranker in json_ranker:
+            rankDic[ranker] = 0
+
+        with open('./Backup/exportMatch.json', 'w', encoding='utf-8') as make_file:
+            json.dump(matchDic, make_file, indent="\t")
+        with open('./Backup/exportSeason.json', 'w', encoding='utf-8') as make_file:
+            json.dump(seasondata, make_file, indent="\t")
+        with open('./Backup/exportRank.json', 'w', encoding='utf-8') as make_file:
+            json.dump(rankDic, make_file, indent="\t")
 
         WriteTop10MatchTeams(json_ranker, userdata, teamName)
     else:
@@ -65,7 +137,7 @@ def FirebaseSeason(currentSeason):
 
 def WriteTop10MatchTeams(json_ranker, userdata, teamName):
     #Top 10 한다.
-    matchTeams = pd.read_csv('./MatchTeams.csv', encoding = 'UTF-8')
+    matchTeams = pd.read_csv('./MatchTeams.csv', encoding = 'utf-8-sig')
     ranking = 0
     for ranker in json_ranker:
         if ranking < 10:
@@ -74,6 +146,7 @@ def WriteTop10MatchTeams(json_ranker, userdata, teamName):
             newData['teamID'] = ""
             newData['teamMultiID'] = ranker
             newData['teamName'] = teamName[ranker]
+            newData['category'] = ""
             newData['topPlayerIDTrait'] = user['topPlayerIDTrait']
             newData['junglePlayerIDTrait'] = user['junglePlayerIDTrait']
             newData['midPlayerIDTrait'] = user['midPlayerIDTrait']
@@ -90,9 +163,8 @@ def WriteTop10MatchTeams(json_ranker, userdata, teamName):
             ranking +=1
         else:
             break
-                
-    
-    matchTeams.to_csv('./MatchTeams.csv', mode='w', index=False, encoding='ms949')
+           
+    matchTeams.to_csv('./MatchTeamsCopy.csv', mode='w', index=False, encoding='utf-8-sig')
 
 def TestFirebaseSeason(currentSeason):
     cred = credentials.Certificate("lol-esports-3080c-firebase-adminsdk-80b6e-851af7998b.json")
@@ -420,4 +492,4 @@ def SeasonJson():
     for data in json_data:
         json_data[data] = 0
 
-TestFirebaseSeason(202100)
+Export(202000)
