@@ -166,6 +166,69 @@ def WriteTop10MatchTeams(json_ranker, userdata, teamName):
            
     matchTeams.to_csv('./MatchTeamsCopy.csv', mode='w', index=False, encoding='utf-8-sig')
 
+def BalanceCheck():
+    with open('./lol-esports-3080c_data.json', 'r', encoding='UTF8') as file:
+        json_data = json.load(file)
+    rankdata = json_data['Ranking']
+    res = sorted(rankdata.items(), reverse=True, key=lambda item: int(item[1]))
+    json_ranker = dict(res)
+    users = json_data['users']
+    avgDF = pd.DataFrame(data=[],columns = ['UID', 'Top', 'Jun', 'mid', 'ad', 'sup', 'total'])
+    # 정렬후 확인 탑 100까지만
+    rank = 1
+    for ranker in json_ranker:
+        # 분류 방법
+        statList = []
+        try:
+            statList.append(CheckTrait(json_data['users'][ranker]['topPlayerIDTrait']))
+            statList.append(CheckTrait(json_data['users'][ranker]['junglePlayerIDTrait']))
+            statList.append(CheckTrait(json_data['users'][ranker]['midPlayerIDTrait']))
+            statList.append(CheckTrait(json_data['users'][ranker]['adPlayerIDTrait']))
+            statList.append(CheckTrait(json_data['users'][ranker]['supPlayerIDTrait']))
+            # 각각의 라인을 분류한거를 합친다.
+            plus = [0,0,0,0,0]
+            for j in range(0, len(statList)):
+                plus[statList[j] -1] += 1
+
+            total = plus.index(max(plus))
+        
+            appendAvgDF = pd.DataFrame(data=[(str(ranker), statList[0], statList[1], statList[2], statList[3], statList[4], total)],columns = ['UID', 'Top', 'Jun', 'mid', 'ad', 'sup', 'total'])
+            avgDF = pd.concat([avgDF, appendAvgDF])
+            print("문제 없음: " + str(ranker))
+        except:
+            print("문제가 있음: " + str(ranker))
+        rank += 1
+        if rank > 100:
+            break
+
+    avgDF.to_csv('./balance.csv', mode='w', index=False, encoding='utf-8-sig')
+    
+def CheckTrait(_trait):
+    # 1,2,3
+    lane = int(_trait[5:7])
+    teamfight = int(_trait[7:9])
+    operation = int(_trait[9:11])
+    # 분류한다. 12345
+    laneOper = lane + operation
+    teamOper = teamfight + operation
+    com = laneOper - teamOper
+    cla = 1
+    # 라인운영이 더 높음
+    if com >= 10:
+        cal = 1
+    elif com >= 5:
+        cal = 2
+    elif com >= 2:
+        cal = 3
+    elif com <= -10:
+        cal = 5
+    elif com <= -5:
+        cal = 4
+    elif com <= -2:
+        cal = 3
+
+    return cal
+
 def TestFirebaseSeason(currentSeason):
     cred = credentials.Certificate("lol-esports-3080c-firebase-adminsdk-80b6e-851af7998b.json")
     firebase_admin.initialize_app(cred,{
@@ -492,4 +555,5 @@ def SeasonJson():
     for data in json_data:
         json_data[data] = 0
 
-Export(202000)
+#Export(202000)
+BalanceCheck()
