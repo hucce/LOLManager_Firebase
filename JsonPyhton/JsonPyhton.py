@@ -3,7 +3,10 @@ from pickle import FALSE
 import firebase_admin
 from firebase_admin import credentials
 from firebase_admin import db
+from firebase_admin import auth
 import pandas as pd
+from datetime import datetime
+from tqdm import tqdm
 
 def FirebaseSeason(currentSeason):
     cred = credentials.Certificate("lol-esports-3080c-firebase-adminsdk-80b6e-851af7998b.json")
@@ -11,6 +14,7 @@ def FirebaseSeason(currentSeason):
         'databaseURL' : "https://lol-esports-3080c.firebaseio.com/"
     })
     dir = db.reference()
+
     json_data = dir.get()
     rankdata = json_data['Ranking']
     userdata = json_data['users']
@@ -87,6 +91,7 @@ def Export(currentSeason, serverUP):
     matchDic = {}
     for ranker in json_ranker:
         matchDic[ranker] = "0,0,0,0"
+
     # 랭크
     rankDic = {}
     for ranker in json_ranker:
@@ -111,11 +116,11 @@ def Export(currentSeason, serverUP):
         })
         dir = db.reference()
         # 업데이트
-        #dir.child('MatchDatas').update(matchDic)
+        dir.child('MatchDatas').update(matchDic)
         print('매치데이터 서버 업로드')
         dir.child('SeasonDatas').update(seasondata)
         print('시즌 서버 완료')
-        #dir.child('Ranking').update(rankDic)
+        dir.child('Ranking').update(rankDic)
         print('랭킹 서버 완료')
 
 def WriteTop10MatchTeams(json_ranker, userdata, teamName):
@@ -569,5 +574,51 @@ def SeasonJson():
     with open('./Backup/rank.json', 'w', encoding='utf-8') as make_file:
         json.dump(json_ranker, make_file, indent="\t")
 
-Export(202300, False)
-#FirebaseSeason(202203)
+
+def Years():
+    # 현재 날짜 확인
+    todayDate = datetime.today()
+    todayDate = todayDate.utcnow()
+
+    cred = credentials.Certificate("lol-esports-3080c-firebase-adminsdk-80b6e-851af7998b.json")
+    firebase_admin.initialize_app(cred,{
+        'databaseURL' : "https://lol-esports-3080c.firebaseio.com/"
+    })
+
+    delUsers = []
+    
+    page = auth.list_users()
+    while page:
+        for user in page.users:
+            login = str(user.user_metadata.last_sign_in_timestamp)[:10]
+            loginDate = datetime.utcfromtimestamp(int(login))
+            vsDate = todayDate - loginDate
+            # 3년 이상이면
+            if vsDate.days >= 1095:
+                delUsers.append([user.uid, loginDate])
+
+        page = page.get_next_page()
+
+    backupPd = pd.DataFrame(data=delUsers, columns=["uid", 'loginDate'])
+    backupPd.to_csv('./User3Years.csv', mode='w', index=False, encoding='utf-8-sig')
+    
+def DelYears():
+    backupPd = pd.read_csv('./User3Years.csv', encoding='utf-8-sig')
+
+    cred = credentials.Certificate("lol-esports-3080c-firebase-adminsdk-80b6e-851af7998b.json")
+    firebase_admin.initialize_app(cred,{
+        'databaseURL' : "https://lol-esports-3080c.firebaseio.com/"
+    })
+
+    dir = db.reference()
+
+    for id in tqdm(backupPd['uid']):
+        try:
+            auth.delete_user(id)
+        except:
+            print("유저 없음: " + id)
+        dir.child('users/').child(id).delete()
+
+#Export(202301, True)
+#FirebaseSeason(202301)
+DelYears()
