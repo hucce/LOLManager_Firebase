@@ -104,7 +104,7 @@ def Export(currentSeason, serverUP):
     with open('./Backup/exportRank.json', 'w', encoding='utf-8') as make_file:
         json.dump(rankDic, make_file, indent="\t")
 
-    WriteTop10MatchTeams(json_ranker, userdata, teamName)
+    WriteTop10MatchTeams(json_ranker, userdata, teamName, matchdata)
 
     print('서버전 백업 완료')
 
@@ -123,7 +123,7 @@ def Export(currentSeason, serverUP):
         dir.child('Ranking').update(rankDic)
         print('랭킹 서버 완료')
 
-def WriteTop10MatchTeams(json_ranker, userdata, teamName):
+def WriteTop10MatchTeams(json_ranker, userdata, teamName, matchdata):
     #Top 10 한다.
     matchTeams = pd.read_csv('./MatchTeams.csv', encoding = 'utf-8-sig')
     ranking = 0
@@ -148,7 +148,7 @@ def WriteTop10MatchTeams(json_ranker, userdata, teamName):
                    newData['coach' + str(c)] = user['CoachList'][str(c)]
 
             # 매치데이터
-            row = user['matchData'].split(',')
+            row = matchdata[ranker].split(',')
             newData['match'] = row[0]
             newData['win'] = row[1]
 
@@ -619,6 +619,9 @@ def DelYears():
             print("유저 없음: " + id)
         dir.child('users/').child(id).delete()
 
-#Export(202301, True)
-FirebaseSeason(202301)
+Export(202401, False)
+#FirebaseSeason(202301)
+
+
+#Years()
 #DelYears()
