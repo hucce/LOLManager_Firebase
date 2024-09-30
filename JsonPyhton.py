@@ -619,7 +619,7 @@ def DelYears():
             print("유저 없음: " + id)
         dir.child('users/').child(id).delete()
 
-Export(202401, False)
+Export(202402, True)
 #FirebaseSeason(202301)
 
 
