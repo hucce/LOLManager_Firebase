@@ -1,5 +1,6 @@
 import json
 from pickle import FALSE
+from time import sleep
 import firebase_admin
 from firebase_admin import credentials
 from firebase_admin import db
@@ -8,7 +9,129 @@ import pandas as pd
 from datetime import datetime
 from tqdm import tqdm
 
+
+def _init_firebase_app():
+    """Initialize Firebase Admin app once.
+
+    firebase_admin.initialize_app()는 프로세스당 1회만 가능하므로,
+    이미 초기화된 경우에는 기존 앱을 재사용한다.
+    """
+    try:
+        firebase_admin.get_app()
+        return
+    except ValueError:
+        pass
+
+    cred = credentials.Certificate("lol-esports-3080c-firebase-adminsdk-80b6e-851af7998b.json")
+    firebase_admin.initialize_app(
+        cred,
+        {
+            'databaseURL': "https://lol-esports-3080c.firebaseio.com/"
+        },
+    )
+
+
+def _normalize_dict_keys_to_str(value):
+    """Firebase Realtime DB는 key가 문자열로 저장되므로 비교를 위해 key를 문자열로 정규화한다."""
+    if isinstance(value, dict):
+        normalized = {}
+        for k, v in value.items():
+            normalized[str(k)] = _normalize_dict_keys_to_str(v)
+        return normalized
+    if isinstance(value, list):
+        return [_normalize_dict_keys_to_str(v) for v in value]
+    return value
+
+
+def _dict_is_subset(expected, actual):
+    """actual이 expected를 (재귀적으로) 포함하면 True.
+
+    - update()는 기존 데이터를 '병합'하므로 서버에 추가 키가 있어도 정상 케이스로 처리한다.
+    """
+    if isinstance(expected, dict):
+        if not isinstance(actual, dict):
+            return False
+        for k, expected_v in expected.items():
+            if k not in actual:
+                return False
+            if not _dict_is_subset(expected_v, actual[k]):
+                return False
+        return True
+    if isinstance(expected, list):
+        # 리스트는 순서/길이 이슈가 많아 기본 비교만 수행
+        return expected == actual
+    return expected == actual
+
+
+def _write_and_verify(dir_ref, child_path, data, method='update', exact=False, retries=3, delay_seconds=1.5, verbose_label=None):
+    """Firebase RTDB에 쓰기 후, get으로 재조회해서 반영 여부를 확인한다.
+
+    - method: 'update' | 'set'
+      - update: 병합(기존 키 유지)
+      - set: 완전 덮어쓰기(기존 키 제거)
+    - exact:
+      - True면 서버 값이 기대값과 '완전 동일'해야 성공
+      - False면 서버 값이 기대값을 '포함'하면 성공(병합 업데이트에 적합)
+    """
+    normalized_data = _normalize_dict_keys_to_str(data)
+    label = verbose_label or child_path
+
+    last_actual = None
+    for attempt in range(1, retries + 1):
+        if method == 'set':
+            dir_ref.child(child_path).set(normalized_data)
+        else:
+            dir_ref.child(child_path).update(normalized_data)
+
+        sleep(delay_seconds)
+
+        last_actual = dir_ref.child(child_path).get() or {}
+        last_actual = _normalize_dict_keys_to_str(last_actual)
+
+        ok = (normalized_data == last_actual) if exact else _dict_is_subset(normalized_data, last_actual)
+        if ok:
+            print(f"{label} 업데이트 검증 성공 (시도 {attempt}/{retries}, method={method}, exact={exact})")
+            return True
+
+        print(f"{label} 업데이트 검증 실패 (시도 {attempt}/{retries}, method={method}, exact={exact})")
+        sleep(delay_seconds)
+
+    print(f"{label} 업데이트 최종 실패: 서버 반영이 확인되지 않았습니다.")
+    return False
+
+
+def _write_job_marker_and_verify(dir_ref, currentSeason, retries=3, delay_seconds=1.0):
+    """트래픽을 최소화하기 위해, 대용량 데이터 자체를 재조회하지 않고 작은 마커만 써서 업로드 성공 여부를 확인한다."""
+    run_id = datetime.utcnow().strftime('%Y%m%d%H%M%S%f')
+    marker_path = 'AdminJobs/ExportRun'
+    marker_payload = {
+        'runId': run_id,
+        'season': str(currentSeason),
+        'utc': datetime.utcnow().isoformat(),
+    }
+
+    ok = _write_and_verify(
+        dir_ref,
+        marker_path,
+        marker_payload,
+        method='update',
+        exact=False,
+        retries=retries,
+        delay_seconds=delay_seconds,
+        verbose_label='AdminJobs/ExportRun',
+    )
+
+    if ok:
+        # runId가 서버에 반영됐는지 한 번 더 확인(매우 작은 get)
+        server_run_id = dir_ref.child(marker_path).child('runId').get()
+        if server_run_id == run_id:
+            print('업로드 마커 검증 성공')
+            return True
+        print('업로드 마커 검증 실패: runId 불일치')
+    return False
+
 def FirebaseSeason(currentSeason):
+    currentSeason = str(currentSeason)
     cred = credentials.Certificate("lol-esports-3080c-firebase-adminsdk-80b6e-851af7998b.json")
     firebase_admin.initialize_app(cred,{
         'databaseURL' : "https://lol-esports-3080c.firebaseio.com/"
@@ -17,6 +140,7 @@ def FirebaseSeason(currentSeason):
 
     json_data = dir.get()
     rankdata = json_data['Ranking']
+    matchdata = json_data['MatchDatas']
     userdata = json_data['users']
     seasondata = json_data['SeasonDatas']
     teamName = json_data['TeamName']
@@ -29,10 +153,17 @@ def FirebaseSeason(currentSeason):
     rank = 1
     # 시즌데이터
     for ranker in json_ranker:
-        if 'matchData' in userdata[ranker]:
-            if 'Season' in userdata[ranker]:
-                row = userdata[ranker]['matchData'].split(',')
-                writeDic = seasondata[ranker]
+        # 매치 데이터가 있는 지 확인한다.
+        if ranker in matchdata:
+            row = matchdata[ranker].split(',')
+            # 10전 이상
+            if int(row[0]) > 9:
+                # 기존 시즌데이터가 있는지 확인한다.
+                writeDic = {}
+                if ranker in seasondata:
+                    writeDic = seasondata[ranker]
+
+                # LP, 매치, 승리, 랭킹
                 writeDic[currentSeason] = str(json_ranker[ranker]) + ',' + row[0] + ',' + row[1] + ',' + str(rank)
                 seasondata[ranker] = writeDic
                 rank +=1
@@ -47,7 +178,7 @@ def FirebaseSeason(currentSeason):
     for ranker in json_ranker:
         rankDic[ranker] = 0
 
-    WriteTop10MatchTeams(json_ranker, userdata, teamName)
+    WriteTop10MatchTeams(json_ranker, userdata, teamName, matchdata)
 
     # 업데이트
     dir.child('MatchDatas').update(matchDic)
@@ -55,6 +186,7 @@ def FirebaseSeason(currentSeason):
     dir.child('SeasonDatas').update(seasondata)
 
 def Export(currentSeason, serverUP):
+    currentSeason = str(currentSeason)
     with open('./lol-esports-3080c_data.json', 'r', encoding='UTF8') as file:
         json_data = json.load(file)
     
@@ -110,18 +242,24 @@ def Export(currentSeason, serverUP):
 
     if serverUP == True:
         # 서버에 업데이트
-        cred = credentials.Certificate("lol-esports-3080c-firebase-adminsdk-80b6e-851af7998b.json")
-        firebase_admin.initialize_app(cred,{
-            'databaseURL' : "https://lol-esports-3080c.firebaseio.com/"
-        })
+        _init_firebase_app()
         dir = db.reference()
-        # 업데이트
-        dir.child('MatchDatas').update(matchDic)
+
+        # 업데이트 (트래픽 최소화를 위해 대용량 노드 재조회/샘플 검증은 하지 않음)
         print('매치데이터 서버 업로드')
+        dir.child('MatchDatas').update(matchDic)
+        sleep(2)
+
+        print('시즌 서버 업로드')
         dir.child('SeasonDatas').update(seasondata)
-        print('시즌 서버 완료')
+        sleep(2)
+
+        print('랭킹 서버 업로드')
         dir.child('Ranking').update(rankDic)
-        print('랭킹 서버 완료')
+        sleep(2)
+
+        # 아주 작은 마커만 업데이트/재조회해서 서버 반영 여부 확인(트래픽 매우 적음)
+        _write_job_marker_and_verify(dir, currentSeason, retries=3, delay_seconds=1.0)
 
 def WriteTop10MatchTeams(json_ranker, userdata, teamName, matchdata):
     #Top 10 한다.
@@ -606,9 +744,12 @@ def DelYears():
     backupPd = pd.read_csv('./User3Years.csv', encoding='utf-8-sig')
 
     cred = credentials.Certificate("lol-esports-3080c-firebase-adminsdk-80b6e-851af7998b.json")
-    firebase_admin.initialize_app(cred,{
-        'databaseURL' : "https://lol-esports-3080c.firebaseio.com/"
-    })
+    try:
+        firebase_admin.initialize_app(cred,{
+            'databaseURL' : "https://lol-esports-3080c.firebaseio.com/"
+        })
+    except:
+        print("이미 초기화됨")
 
     dir = db.reference()
 
@@ -619,9 +760,7 @@ def DelYears():
             print("유저 없음: " + id)
         dir.child('users/').child(id).delete()
 
-Export(202402, True)
-#FirebaseSeason(202301)
-
+Export(202503, True)
 
 #Years()
 #DelYears()
