@@ -1,4 +1,5 @@
 import json
+import os
 from pickle import FALSE
 from time import sleep
 import firebase_admin
@@ -6,8 +7,9 @@ from firebase_admin import credentials
 from firebase_admin import db
 from firebase_admin import auth
 import pandas as pd
-from datetime import datetime
+from datetime import datetime, timezone
 from tqdm import tqdm
+
 
 
 def _init_firebase_app():
@@ -714,53 +716,158 @@ def SeasonJson():
 
 
 def Years():
-    # 현재 날짜 확인
-    todayDate = datetime.today()
-    todayDate = todayDate.utcnow()
+    # 현재 UTC 날짜 확인
+    todayDate = datetime.now(timezone.utc)
 
-    cred = credentials.Certificate("lol-esports-3080c-firebase-adminsdk-80b6e-851af7998b.json")
-    firebase_admin.initialize_app(cred,{
-        'databaseURL' : "https://lol-esports-3080c.firebaseio.com/"
-    })
+    _init_firebase_app()
 
     delUsers = []
-    
+    total_scanned = 0
+
+    print("Firebase Auth 유저 목록 조회 시작...")
     page = auth.list_users()
     while page:
         for user in page.users:
-            login = str(user.user_metadata.last_sign_in_timestamp)[:10]
-            loginDate = datetime.utcfromtimestamp(int(login))
-            vsDate = todayDate - loginDate
-            # 3년 이상이면
-            if vsDate.days >= 1095:
-                delUsers.append([user.uid, loginDate])
+            total_scanned += 1
+            meta = user.user_metadata
+            last_sign_in_ms = meta.last_sign_in_timestamp
+            creation_ms = meta.creation_timestamp
 
+            # 마지막 로그인 시각이 있으면 사용, 없으면 가입일 사용
+            if last_sign_in_ms:
+                active_date = datetime.fromtimestamp(last_sign_in_ms / 1000.0, tz=timezone.utc)
+                date_type = "last_login"
+            elif creation_ms:
+                active_date = datetime.fromtimestamp(creation_ms / 1000.0, tz=timezone.utc)
+                date_type = "created"
+            else:
+                continue
+
+            vsDate = todayDate - active_date
+            # 3년(1095일) 이상 경과
+            if vsDate.days >= 1095:
+                delUsers.append({
+                    "uid": user.uid,
+                    "lastActiveDate": active_date.strftime("%Y-%m-%d %H:%M:%S"),
+                    "dateType": date_type,
+                    "daysInactive": vsDate.days
+                })
+
+        print(f"조회 진행 중... 현재까지 스캔된 유저: {total_scanned}명, 3년 이상 미접속: {len(delUsers)}명")
         page = page.get_next_page()
 
-    backupPd = pd.DataFrame(data=delUsers, columns=["uid", 'loginDate'])
+    backupPd = pd.DataFrame(delUsers)
     backupPd.to_csv('./User3Years.csv', mode='w', index=False, encoding='utf-8-sig')
-    
-def DelYears():
-    backupPd = pd.read_csv('./User3Years.csv', encoding='utf-8-sig')
+    print(f"\n[완료] 총 {total_scanned}명 중 3년 이상 미접속 유저 {len(delUsers)}명을 './User3Years.csv'에 저장했습니다.")
+    return backupPd
 
-    cred = credentials.Certificate("lol-esports-3080c-firebase-adminsdk-80b6e-851af7998b.json")
-    try:
-        firebase_admin.initialize_app(cred,{
-            'databaseURL' : "https://lol-esports-3080c.firebaseio.com/"
-        })
-    except:
-        print("이미 초기화됨")
 
-    dir = db.reference()
+def BackupTargetUsers(uids):
+    """삭제 대상 유저들의 DB 데이터(users, Ranking, MatchDatas, TeamName)를 로컬 JSON 파일로 백업합니다 (SeasonDatas는 제외/보존)."""
+    _init_firebase_app()
+    dir_ref = db.reference()
 
-    for id in tqdm(backupPd['uid']):
+    uids_set = set(uids)
+    print(f"\n[데이터 백업] 대상 유저 {len(uids_set)}명의 DB 데이터 백업을 시작합니다...")
+
+    os.makedirs('./Backup', exist_ok=True)
+
+    backup_data = {
+        "backup_time": datetime.now(timezone.utc).isoformat(),
+        "total_target_users": len(uids_set),
+        "users": {},
+        "Ranking": {},
+        "MatchDatas": {},
+        "TeamName": {}
+    }
+
+    nodes = ['users', 'Ranking', 'MatchDatas', 'TeamName']
+    for node_name in nodes:
+        print(f"  - [{node_name}] 노드 데이터 가져오는 중...")
         try:
-            auth.delete_user(id)
-        except:
-            print("유저 없음: " + id)
-        dir.child('users/').child(id).delete()
+            node_data = dir_ref.child(node_name).get() or {}
+            matched = {k: v for k, v in node_data.items() if k in uids_set}
+            backup_data[node_name] = matched
+            print(f"    -> [{node_name}] {len(matched)}건 수집 완료")
+        except Exception as e:
+            print(f"    -> [{node_name}] 수집 중 오류: {e}")
 
-Export(202503, True)
+    timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S")
+    backup_file = f"./Backup/backup_3years_deleted_{timestamp_str}.json"
+    with open(backup_file, 'w', encoding='utf-8') as f:
+        json.dump(backup_data, f, ensure_ascii=False, indent=2)
 
-#Years()
-#DelYears()
+    file_size_kb = os.path.getsize(backup_file) / 1024.0
+    print(f"[백업 완료] 저장 경로: {backup_file} ({file_size_kb:.2f} KB)")
+    return backup_file
+
+
+def DelYears(skip_backup=False):
+    if not os.path.exists('./User3Years.csv'):
+        print("삭제 대상 파일 './User3Years.csv'가 없습니다. 먼저 Years()를 실행하세요.")
+        return
+
+    backupPd = pd.read_csv('./User3Years.csv', encoding='utf-8-sig')
+    uids = backupPd['uid'].dropna().astype(str).tolist()
+    total = len(uids)
+    print(f"\n[삭제 작업 준비] './User3Years.csv'에서 {total}명의 대상 유저를 불러왔습니다.")
+
+    if total == 0:
+        print("삭제할 대상 유저가 없습니다.")
+        return
+
+    _init_firebase_app()
+    dir_ref = db.reference()
+
+    # 1. 삭제 전 로컬 백업
+    if not skip_backup:
+        BackupTargetUsers(uids)
+    else:
+        print("[주의] 백업을 건너뛰고 바로 삭제를 진행합니다.")
+
+    # 2. Firebase Auth 일괄 삭제 (배치: 최대 1,000개)
+    print(f"\n[1/2] Firebase Auth 계정 삭제 시작 (총 {total}명)...")
+    auth_chunk_size = 1000
+    auth_deleted_count = 0
+    auth_errors_count = 0
+
+    for i in tqdm(range(0, total, auth_chunk_size), desc="Auth Batch Delete"):
+        chunk = uids[i:i + auth_chunk_size]
+        try:
+            result = auth.delete_users(chunk)
+            auth_deleted_count += result.success_count
+            auth_errors_count += result.failure_count
+        except Exception as e:
+            print(f"Auth 일괄 삭제 오류 ({i}~{i+len(chunk)}): {e}")
+
+    print(f"  -> Firebase Auth 삭제 완료 (성공: {auth_deleted_count}건, 미존재/실패: {auth_errors_count}건)")
+
+    # 3. Firebase RTDB 일괄 삭제 (SeasonDatas는 제외/보존, users/Ranking/MatchDatas/TeamName 삭제)
+    print(f"\n[2/2] Firebase RTDB 데이터 삭제 시작 (SeasonDatas 제외 보존)...")
+    db_chunk_size = 500
+    for i in tqdm(range(0, total, db_chunk_size), desc="RTDB Multi-path Delete"):
+        chunk = uids[i:i + db_chunk_size]
+        updates = {}
+        for uid in chunk:
+            updates[f"users/{uid}"] = None
+            updates[f"Ranking/{uid}"] = None
+            updates[f"MatchDatas/{uid}"] = None
+            updates[f"TeamName/{uid}"] = None
+
+        try:
+            dir_ref.update(updates)
+        except Exception as e:
+            print(f"RTDB 일괄 삭제 오류 ({i}~{i+len(chunk)}): {e}")
+
+    print("\n[완료] 3년 이상 미접속 유저 삭제 작업이 모두 성공적으로 완료되었습니다!")
+
+
+if __name__ == '__main__':
+    # 위험: 실제 운영 DB 덮어쓰기 방지를 위해 주석 처리 유지
+    # Export(202503, True)
+
+    # 1. 3년 이상 미접속 유저 조회 및 CSV 저장
+    Years()
+
+    # 2. 데이터 백업 및 삭제 진행
+    DelYears()
